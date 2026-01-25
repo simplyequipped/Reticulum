@@ -223,6 +223,9 @@ class ROM():
     MODEL_DE            = 0xDE # Xiao ESP32S3 with Wio-SX1262 module, 433 MHz
     MODEL_DD            = 0xDD # Xiao ESP32S3 with Wio-SX1262 module, 868 MHz
 
+    PRODUCT_RNODE_PRO   = 0x18
+    MODEL_19            = 0x19
+
     PRODUCT_HMBRW  = 0xF0
     MODEL_FF       = 0xFF
     MODEL_FE       = 0xFE
@@ -293,6 +296,7 @@ products = {
     ROM.PRODUCT_OPENCOM_XL: "openCom XL",
     ROM.PRODUCT_HELTEC_T114: "Heltec Mesh Node T114",
     ROM.PRODUCT_XIAO_S3: "Seeed XIAO ESP32S3 Wio-SX1262",
+    ROM.PRODUCT_RNODE_PRO: "RNode Pro",
 }
 
 platforms = {
@@ -349,6 +353,7 @@ models = {
     0x14: [779000000, 928000000, 22, "779 - 928 MHz", "rnode_firmware_rak4631_sx1280.zip", "SX1262 + SX1280"],
     0x16: [779000000, 928000000, 22, "430 - 510 Mhz", "rnode_firmware_techo.zip", "SX1262"],
     0x17: [779000000, 928000000, 22, "779 - 928 Mhz", "rnode_firmware_techo.zip", "SX1262"],
+    0x19: [779000000, 928000000, 22, "779 - 928 MHz", "rnode_firmware_rnode_pro.zip", "SX1262"],
     0x21: [820000000, 960000000, 22, "820 - 960 MHz", "rnode_firmware_opencom_xl.zip", "SX1262 + SX1280"],
     0xDE: [420000000, 520000000, 22, "420 - 520 MHz", "rnode_firmware_xiao_esp32s3.zip", "SX1262"],
     0xDD: [850000000, 950000000, 22, "850 - 950 MHz", "rnode_firmware_xiao_esp32s3.zip", "SX1262"],
