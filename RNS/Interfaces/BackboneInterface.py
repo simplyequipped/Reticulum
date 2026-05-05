@@ -228,10 +228,10 @@ class BackboneInterface(Interface):
         if interface.socket:
             fileno = interface.socket.fileno()
             if fileno in BackboneInterface.spawned_interface_filenos:
-                try:
-                    BackboneInterface.epoll.modify(interface.socket.fileno(), select.EPOLLOUT)
+                try: BackboneInterface.epoll.modify(fileno, select.EPOLLOUT)
                 except Exception as e:
-                    RNS.trace_exception(e)
+                    RNS.log(f"Error occurred on {interface} while modifying socket EPOLL state: {e}", RNS.LOG_WARNING)
+                    raise e
 
     @staticmethod
     def __job():
@@ -270,8 +270,7 @@ class BackboneInterface(Interface):
                                         spawned_interface.receive(received_bytes)
                                 
                                 elif client_socket and fileno == client_socket.fileno() and (event & select.EPOLLOUT):
-                                    try:
-                                        written = client_socket.send(spawned_interface.transmit_buffer)
+                                    try: written = client_socket.send(spawned_interface.transmit_buffer)
                                     except Exception as e:
                                         written = 0
                                         if not spawned_interface.detached: RNS.log(f"Error while writing to {spawned_interface}: {e}", RNS.LOG_DEBUG)
@@ -293,7 +292,11 @@ class BackboneInterface(Interface):
                                         spawned_interface.receive(b"")
 
                                     spawned_interface.transmit_buffer = spawned_interface.transmit_buffer[written:]
-                                    if len(spawned_interface.transmit_buffer) == 0: BackboneInterface.epoll.modify(fileno, select.EPOLLIN)
+                                    try:
+                                        if len(spawned_interface.transmit_buffer) == 0: BackboneInterface.epoll.modify(fileno, select.EPOLLIN)
+                                    except Exception as e:
+                                        RNS.log(f"Error while setting EPOLLIN on {spawned_interface}: {e}", RNS.LOG_ERROR)
+
                                     spawned_interface.txb += written
                                     if spawned_interface.parent_interface: spawned_interface.parent_interface.txb += written
                                 
@@ -344,6 +347,16 @@ class BackboneInterface(Interface):
             spawned_interface = BackboneClientInterface(self.owner, spawned_configuration, connected_socket=socket)
             spawned_interface.OUT = self.OUT
             spawned_interface.IN  = self.IN
+
+            spawned_interface.ingress_control = self.ingress_control
+            spawned_interface.ic_max_held_announces = self.ic_max_held_announces
+            spawned_interface.ic_burst_hold = self.ic_burst_hold
+            spawned_interface.ic_burst_freq = self.ic_burst_freq
+            spawned_interface.ic_burst_freq_new = self.ic_burst_freq_new
+            spawned_interface.ic_new_time = self.ic_new_time
+            spawned_interface.ic_burst_penalty = self.ic_burst_penalty
+            spawned_interface.ic_held_release_interval = self.ic_held_release_interval
+            
             spawned_interface.socket = socket
             spawned_interface.target_ip = socket.getpeername()[0]
             spawned_interface.target_port = str(socket.getpeername()[1])

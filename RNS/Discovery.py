@@ -106,30 +106,35 @@ class InterfaceAnnouncer():
                      LONGITUDE:      interface.discovery_longitude,
                      HEIGHT:         interface.discovery_height}
 
-            reachable_on = self.sanitize(interface.reachable_on)
-            if not RNS.vendor.platformutils.is_windows():
-                try:
-                    exec_path = os.path.expanduser(reachable_on)
-                    if os.path.isfile(exec_path) and os.access(exec_path, os.X_OK):
-                        RNS.log(f"Evaluating reachable_on from executable at {exec_path}", RNS.LOG_DEBUG)
-                        exec_result = subprocess.run([exec_path], stdout=subprocess.PIPE)
-                        exec_stdout = exec_result.stdout.decode("utf-8")
-                        if exec_result.returncode != 0: raise ValueError("Non-zero exit code from subprocess")
-                        reachable_on = self.sanitize(exec_stdout)
-                        if not (is_ip_address(reachable_on) or is_hostname(reachable_on)):
-                            raise ValueError(f"Valid IP address or hostname was not found in external script output \"{reachable_on}\"")
-
-                except Exception as e:
-                    RNS.log(f"Error while getting reachable_on from executable at {interface.reachable_on}: {e}", RNS.LOG_ERROR)
-                    RNS.log(f"Aborting discovery announce", RNS.LOG_ERROR)
-                    return None
-
-            if not (is_ip_address(reachable_on) or is_hostname(reachable_on)):
-                RNS.log(f"The configured reachable_on parameter \"{reachable_on}\" for {interface} is not a valid IP address or hostname", RNS.LOG_ERROR)
-                RNS.log(f"Aborting discovery announce", RNS.LOG_ERROR)
+            if interface_type == "TCPClientInterface" and not interface.kiss_framing:
+                RNS.log(f"Invalid interface discovery configuration for {interface}, aborting discovery announce", RNS.LOG_ERROR)
                 return None
 
             if interface_type in ["BackboneInterface", "TCPServerInterface"]:
+                reachable_on = self.sanitize(interface.reachable_on)
+
+                if not RNS.vendor.platformutils.is_windows():
+                    try:
+                        exec_path = os.path.expanduser(reachable_on)
+                        if os.path.isfile(exec_path) and os.access(exec_path, os.X_OK):
+                            RNS.log(f"Evaluating reachable_on from executable at {exec_path}", RNS.LOG_DEBUG)
+                            exec_result = subprocess.run([exec_path], stdout=subprocess.PIPE)
+                            exec_stdout = exec_result.stdout.decode("utf-8")
+                            if exec_result.returncode != 0: raise ValueError("Non-zero exit code from subprocess")
+                            reachable_on = self.sanitize(exec_stdout)
+                            if not (is_ip_address(reachable_on) or is_hostname(reachable_on)):
+                                raise ValueError(f"Valid IP address or hostname was not found in external script output \"{reachable_on}\"")
+
+                    except Exception as e:
+                        RNS.log(f"Error while getting reachable_on from executable at {interface.reachable_on}: {e}", RNS.LOG_ERROR)
+                        RNS.log(f"Aborting discovery announce", RNS.LOG_ERROR)
+                        return None
+
+                if not (is_ip_address(reachable_on) or is_hostname(reachable_on)):
+                    RNS.log(f"The configured reachable_on parameter \"{reachable_on}\" for {interface} is not a valid IP address or hostname", RNS.LOG_ERROR)
+                    RNS.log(f"Aborting discovery announce", RNS.LOG_ERROR)
+                    return None
+
                 info[REACHABLE_ON]    = reachable_on
                 info[PORT]            = interface.bind_port
 
@@ -336,18 +341,19 @@ class InterfaceAnnounceHandler:
             RNS.log(f"An error occurred while trying to decode discovered interface. The contained exception was: {e}", RNS.LOG_DEBUG)
 
 class InterfaceDiscovery():
-    THRESHOLD_UNKNOWN = 24*60*60
-    THRESHOLD_STALE   = 3*24*60*60
-    THRESHOLD_REMOVE  = 7*24*60*60
+    THRESHOLD_UNKNOWN  = 24*60*60
+    THRESHOLD_STALE    = 3*24*60*60
+    THRESHOLD_REMOVE   = 7*24*60*60
 
-    MONITOR_INTERVAL  = 5
-    DETACH_THRESHOLD  = 12
+    MONITOR_INTERVAL   = 5
+    DETACH_THRESHOLD   = 12
 
-    STATUS_STALE      = 0
-    STATUS_UNKNOWN    = 100
-    STATUS_AVAILABLE  = 1000
-    STATUS_CODE_MAP   = {"available": STATUS_AVAILABLE, "unknown": STATUS_UNKNOWN, "stale": STATUS_STALE}
-    AUTOCONNECT_TYPES = ["BackboneInterface", "TCPServerInterface"]
+    STATUS_STALE       = 0
+    STATUS_UNKNOWN     = 100
+    STATUS_AVAILABLE   = 1000
+    STATUS_CODE_MAP    = {"available": STATUS_AVAILABLE, "unknown": STATUS_UNKNOWN, "stale": STATUS_STALE}
+    AUTOCONNECT_TYPES  = ["BackboneInterface", "TCPServerInterface"]
+    DISCOVERABLE_TYPES = ["BackboneInterface", "TCPServerInterface", "I2PInterface", "RNodeInterface", "WeaveInterface", "KISSInterface"]
 
     def __init__(self, required_value=InterfaceAnnouncer.DEFAULT_STAMP_VALUE, callback=None, discover_interfaces=True):
         if not required_value: required_value = InterfaceAnnouncer.DEFAULT_STAMP_VALUE
@@ -384,6 +390,7 @@ class InterfaceDiscovery():
                 if heard_delta > self.THRESHOLD_REMOVE: should_remove = True
                 elif discovery_sources and not "network_id" in info: should_remove = True
                 elif discovery_sources and not bytes.fromhex(info["network_id"]) in discovery_sources: should_remove = True
+                elif not "type" in info or ("type" in info and not info["type"] in self.DISCOVERABLE_TYPES): should_remove = True
                 elif "reachable_on" in info:
                     if not (is_ip_address(info["reachable_on"]) or is_hostname(info["reachable_on"])): should_remove = True
 
@@ -420,6 +427,8 @@ class InterfaceDiscovery():
             value = info["value"]
             interface_type = info["type"]
             discovery_hash = info["discovery_hash"]
+            discovered_type = info["type"]
+            if not discovered_type in self.DISCOVERABLE_TYPES: return
             hops = info["hops"]; ms = "" if hops == 1 else "s"
             filename = RNS.hexrep(discovery_hash, delimit=False)
             filepath = os.path.join(self.storagepath, filename)

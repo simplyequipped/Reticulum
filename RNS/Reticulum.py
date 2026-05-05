@@ -47,6 +47,7 @@ else:
     from RNS.Interfaces import *
 
 from RNS.vendor.configobj import ConfigObj
+from threading import Lock
 import configparser
 import multiprocessing.connection
 import importlib.util
@@ -171,6 +172,8 @@ class Reticulum:
     cachepath        = ""
     interfacepath    = ""
 
+    gracious_persist_lock = Lock()
+
     __instance       = None
 
     __interface_detach_ran = False
@@ -183,13 +186,11 @@ class Reticulum:
         # out cleanup operations.
         if not Reticulum.__exit_handler_ran:
             Reticulum.__exit_handler_ran = True
-            if not Reticulum.__interface_detach_ran:
-                RNS.Transport.detach_interfaces()
+            if not Reticulum.__interface_detach_ran: RNS.Transport.detach_interfaces()
             RNS.Transport.exit_handler()
             RNS.Identity.exit_handler()
 
-            if RNS.Profiler.ran():
-                RNS.Profiler.results()
+            if RNS.Profiler.ran(): RNS.Profiler.results()
 
             RNS.loglevel = -1
 
@@ -238,7 +239,7 @@ class Reticulum:
 
         if logdest == RNS.LOG_FILE:
             RNS.logdest = RNS.LOG_FILE
-            RNS.logfile = Reticulum.configdir+"/logfile"
+            RNS.logfile = RNS.logfile or Reticulum.configdir+"/logfile"
         elif callable(logdest):
             RNS.logdest = RNS.LOG_CALLBACK
             RNS.logcall = logdest
@@ -322,6 +323,7 @@ class Reticulum:
         RNS.log(f"Configuration loaded from {self.configpath}", RNS.LOG_VERBOSE)
 
         RNS.Identity.load_known_destinations()
+        if not self.is_connected_to_shared_instance: RNS.Identity._clean_ratchets()
         RNS.Transport.start(self)
 
         if self.use_af_unix:
@@ -351,7 +353,6 @@ class Reticulum:
 
     def __start_jobs(self):
         if self.jobs_thread == None:
-            RNS.Identity._clean_ratchets()
             self.jobs_thread = threading.Thread(target=self.__jobs)
             self.jobs_thread.daemon = True
             self.jobs_thread.start()
@@ -361,11 +362,11 @@ class Reticulum:
             now = time.time()
 
             if now > self.last_cache_clean+Reticulum.CLEAN_INTERVAL:
-                self.__clean_caches()
+                self.__clean_caches(background=True)
                 self.last_cache_clean = time.time()
 
             if now > self.last_data_persist+Reticulum.PERSIST_INTERVAL:
-                self.__persist_data()
+                self.__persist_data(background=True)
             
             time.sleep(Reticulum.JOB_INTERVAL)
 
@@ -960,7 +961,7 @@ class Reticulum:
                 interface.optimise_mtu()
 
                 if ifac_size != None: interface.ifac_size = ifac_size
-                else: interface.ifac_size = 8
+                else:                 interface.ifac_size = interface.DEFAULT_IFAC_SIZE
 
                 interface.announce_cap = announce_cap if announce_cap != None else Reticulum.ANNOUNCE_CAP/100.0
                 interface.announce_rate_target = announce_rate_target
@@ -993,16 +994,20 @@ class Reticulum:
                 RNS.Transport.interfaces.append(interface)
                 interface.final_init()
 
-    def _should_persist_data(self):
+    def _should_persist_data(self, background=False):
         if time.time() > self.last_data_persist+Reticulum.GRACIOUS_PERSIST_INTERVAL:
-            self.__persist_data()
+            def job(): self.__persist_data(background=background)
+            if background: threading.Thread(target=job, daemon=True).start()
+            else:          job()
 
-    def __persist_data(self):
-        RNS.Transport.persist_data()
-        RNS.Identity.persist_data()
-        self.last_data_persist = time.time()
+    def __persist_data(self, background=False):
+        if Reticulum.gracious_persist_lock.locked(): return
+        with Reticulum.gracious_persist_lock:
+            RNS.Transport.persist_data(background=background)
+            RNS.Identity.persist_data(background=background)
+            self.last_data_persist = time.time()
 
-    def __clean_caches(self):
+    def __clean_caches(self, background=False):
         RNS.log("Cleaning resource and packet caches...", RNS.LOG_EXTREME)
         now = time.time()
 
@@ -1013,8 +1018,8 @@ class Reticulum:
                     filepath = self.resourcepath + "/" + filename
                     mtime = os.path.getmtime(filepath)
                     age = now - mtime
-                    if age > Reticulum.RESOURCE_CACHE:
-                        os.unlink(filepath)
+                    if age > Reticulum.RESOURCE_CACHE: os.unlink(filepath)
+                    if background: time.sleep(0.001)
 
             except Exception as e:
                 RNS.log("Error while cleaning resources cache, the contained exception was: "+str(e), RNS.LOG_ERROR)
@@ -1026,8 +1031,8 @@ class Reticulum:
                     filepath = self.cachepath + "/" + filename
                     mtime = os.path.getmtime(filepath)
                     age = now - mtime
-                    if age > RNS.Transport.DESTINATION_TIMEOUT:
-                        os.unlink(filepath)
+                    if age > RNS.Transport.DESTINATION_TIMEOUT: os.unlink(filepath)
+                    if background: time.sleep(0.001)
             
             except Exception as e:
                 RNS.log("Error while cleaning resources cache, the contained exception was: "+str(e), RNS.LOG_ERROR)
@@ -1080,12 +1085,46 @@ class Reticulum:
                     identity_hash = call["unblackhole_identity"]
                     rpc_connection.send(self.unblackhole_identity(identity_hash))
 
+                if "destination_data" in call:
+                    operation = call["destination_data"]
+                    destination_hash = call["destination_hash"]
+                    if   operation == "used":     rpc_connection.send(self._used_destination_data(destination_hash))
+                    elif operation == "retain":   rpc_connection.send(self._retain_destination_data(destination_hash))
+                    elif operation == "unretain": rpc_connection.send(self._unretain_destination_data(destination_hash))
+
                 rpc_connection.close()
 
             except Exception as e:
                 RNS.log("An error ocurred while handling RPC call from local client: "+str(e), RNS.LOG_ERROR)
 
     def get_rpc_client(self): return multiprocessing.connection.Client(self.rpc_addr, family=self.rpc_type, authkey=self.rpc_key)
+
+    def _used_destination_data(self, destination_hash):
+        if self.is_connected_to_shared_instance:
+            rpc_connection = self.get_rpc_client()
+            rpc_connection.send({"destination_data": "used", "destination_hash": destination_hash})
+            response = rpc_connection.recv()
+            return response
+        
+        else: return RNS.Identity._used_destination_data(destination_hash)
+
+    def _retain_destination_data(self, destination_hash):
+        if self.is_connected_to_shared_instance:
+            rpc_connection = self.get_rpc_client()
+            rpc_connection.send({"destination_data": "retain", "destination_hash": destination_hash})
+            response = rpc_connection.recv()
+            return response
+        
+        else: return RNS.Identity._retain_destination_data(destination_hash)
+
+    def _unretain_destination_data(self, destination_hash):
+        if self.is_connected_to_shared_instance:
+            rpc_connection = self.get_rpc_client()
+            rpc_connection.send({"destination_data": "unretain", "destination_hash": destination_hash})
+            response = rpc_connection.recv()
+            return response
+        
+        else: return RNS.Identity._unretain_destination_data(destination_hash)
 
     def get_interface_stats(self):
         if self.is_connected_to_shared_instance:

@@ -55,8 +55,8 @@ class Interface:
 
     # How many samples to use for announce
     # frequency calculations
-    IA_FREQ_SAMPLES     = 6
-    OA_FREQ_SAMPLES     = 6
+    IA_FREQ_SAMPLES     = 128
+    OA_FREQ_SAMPLES     = 128
 
     # Maximum amount of ingress limited announces
     # to hold at any given time.
@@ -66,11 +66,12 @@ class Interface:
     # considered to be newly created. Two
     # hours by default.
     IC_NEW_TIME              = 2*60*60
-    IC_BURST_FREQ_NEW        = 3.5
-    IC_BURST_FREQ            = 12
+    IC_BURST_FREQ_NEW        = 6
+    IC_BURST_FREQ            = 35
     IC_BURST_HOLD            = 1*60
-    IC_BURST_PENALTY         = 5*60
-    IC_HELD_RELEASE_INTERVAL = 30
+    IC_BURST_PENALTY         = 15
+    IC_HELD_RELEASE_INTERVAL = 2
+    IC_DEQUE_MIN_SAMPLE      = 32
 
     AUTOCONFIGURE_MTU = False
     FIXED_MTU         = False
@@ -92,6 +93,7 @@ class Interface:
         self.spawned_interfaces = None
         self.tunnel_id = None
         self.ingress_control = True
+        self.phy_keepalive = False
         self.ic_max_held_announces = Interface.MAX_HELD_ANNOUNCES
         self.ic_burst_hold = Interface.IC_BURST_HOLD
         self.ic_burst_active = False
@@ -122,20 +124,19 @@ class Interface:
             if self.ic_burst_active:
                 if ia_freq < freq_threshold and time.time() > self.ic_burst_activated+self.ic_burst_hold:
                     self.ic_burst_active = False
-                    self.ic_held_release = time.time() + self.ic_burst_penalty
+
                 return True
 
             else:
                 if ia_freq > freq_threshold:
                     self.ic_burst_active = True
                     self.ic_burst_activated = time.time()
+                    self.ic_held_release = time.time() + self.ic_burst_penalty
                     return True
 
-                else:
-                    return False
+                else: return False
 
-        else:
-            return False
+        else: return False
 
     def optimise_mtu(self):
         if self.AUTOCONFIGURE_MTU:
@@ -175,7 +176,7 @@ class Interface:
 
     def process_held_announces(self):
         try:
-            if not self.should_ingress_limit() and len(self.held_announces) > 0 and time.time() > self.ic_held_release:
+            if len(self.held_announces) > 0 and time.time() > self.ic_held_release:
                 freq_threshold = self.ic_burst_freq_new if self.age() < self.ic_new_time else self.ic_burst_freq
                 ia_freq = self.incoming_announce_frequency()
                 if ia_freq < freq_threshold:
@@ -191,8 +192,7 @@ class Interface:
                         RNS.log("Releasing held announce packet "+str(selected_announce_packet)+" from "+str(self), RNS.LOG_EXTREME)
                         self.ic_held_release = time.time() + self.ic_held_release_interval
                         self.held_announces.pop(selected_announce_packet.destination_hash)
-                        def release():
-                            RNS.Transport.inbound(selected_announce_packet.raw, selected_announce_packet.receiving_interface)
+                        def release(): RNS.Transport.inbound(selected_announce_packet.raw, selected_announce_packet.receiving_interface)
                         threading.Thread(target=release, daemon=True).start()
         
         except Exception as e:
@@ -210,38 +210,24 @@ class Interface:
             self.parent_interface.sent_announce(from_spawned=True)
 
     def incoming_announce_frequency(self):
-        if not len(self.ia_freq_deque) > 1:
-            return 0
+        n = len(self.ia_freq_deque)
+        if not n > self.IC_DEQUE_MIN_SAMPLE: return 0
         else:
-            dq_len = len(self.ia_freq_deque)
-            delta_sum = 0
-            for i in range(1,dq_len):
-                delta_sum += self.ia_freq_deque[i]-self.ia_freq_deque[i-1]
-            delta_sum += time.time() - self.ia_freq_deque[dq_len-1]
-            
-            if delta_sum == 0:
-                avg = 0
-            else:
-                avg = 1/(delta_sum/(dq_len))
-
-            return avg
+            oldest = self.ia_freq_deque[0]
+            span = time.time() - oldest
+            if span <= 0: return 0
+            hz = n / span
+            return hz
 
     def outgoing_announce_frequency(self):
-        if not len(self.oa_freq_deque) > 1:
-            return 0
+        n = len(self.oa_freq_deque)
+        if not len(self.oa_freq_deque) > 1: return 0
         else:
-            dq_len = len(self.oa_freq_deque)
-            delta_sum = 0
-            for i in range(1,dq_len):
-                delta_sum += self.oa_freq_deque[i]-self.oa_freq_deque[i-1]
-            delta_sum += time.time() - self.oa_freq_deque[dq_len-1]
-            
-            if delta_sum == 0:
-                avg = 0
-            else:
-                avg = 1/(delta_sum/(dq_len))
-
-            return avg
+            oldest = self.oa_freq_deque[0]
+            span   = time.time() - oldest
+            if span <= 0: return 0
+            hz = n / span
+            return hz
 
     def process_announce_queue(self):
         if not hasattr(self, "announce_cap"):

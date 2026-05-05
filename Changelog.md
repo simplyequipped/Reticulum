@@ -1,3 +1,231 @@
+### 2026-05-05: RNS 1.2.3
+
+This release adds Work Document and update/commenting support to `rngit`. 
+
+**Changes**
+- Added Work Document management to `rngit`.
+- Added Work pages to the page node of `rngit`.
+- Added `interact` permission type to `rngit`.
+- Added `admin` permission type to `rngit`.
+- Added markdown blockquote support to the `rngit` markdown-to-micron converter.
+- Improved markdown-to-micron conversion and syntax highlighting accuracy in `rngit`.
+
+**Release Hashes**
+```
+8562130f297a6b33be9d72c449bbe6ae83cad41e1530e0fa112f5fa545a3f364 rns-1.2.3-py3-none-any.whl
+0862f46a08e610add1bcac0916c6554f3e79590ab2765900178d5e1f1f0c7026 rnspure-1.2.3-py3-none-any.whl
+```
+
+**Release Signatures**
+Release artifacts include `rsg` signature files that can be validated against the RNS release signing identity `<bc7291552be7a58f361522990465165c>` using `rnid`:
+
+```sh
+rnid -i bc7291552be7a58f361522990465165c -V rns-1.2.2-py3-none-any.whl.rsg
+```
+
+### 2026-05-05: RNS 1.2.2
+
+This release adds release management workflows to the `rngit` utility. Downloading files and release artifacts from `rngit` will require the latest version of Nomad Network. Other nomadnet clients *may* have to update their file download link handling, if they don't already support passing query parameters for file download links.
+
+**Changes**
+- Added release management to `rngit`.
+- Added release pages to the page node of `rngit`.
+- Added file downloads in the tree browser of `rngit`.
+
+**Release Hashes**
+```
+4bf0a376a9778de8a91b9ec8a5bc4b929be928eede8784b20022c7fe52bbce62 rns-1.2.2-py3-none-any.whl
+d85f8b765dcf718d284388b249ca0e48e785f250bb41773a83e159e46c5bcf70 rnspure-1.2.2-py3-none-any.whl
+```
+
+**Release Signatures**
+Release artifacts include `rsg` signature files that can be validated against the RNS release signing identity `<bc7291552be7a58f361522990465165c>` using `rnid`:
+
+```sh
+rnid -i bc7291552be7a58f361522990465165c -V rns-1.2.2-py3-none-any.whl.rsg
+```
+
+### 2026-05-04: RNS 1.2.1
+
+This release adds a nomadnet Git page node to the `rngit` utility.
+
+**Changes**
+- Added nomadnet page node to `rngit`.
+
+**Release Hashes**
+```
+5ccbfc31b528133c4dd06c132034c2151e4eed74bc2dcf40af52385094492c9e rns-1.2.1-py3-none-any.whl
+cda45994a58f18bf25244a1f396c9197240bc012dd85c86bffc2e73dcf0607de rnspure-1.2.1-py3-none-any.whl
+```
+
+**Release Signatures**
+Release artifacts include `rsg` signature files that can be validated against the RNS release signing identity `<bc7291552be7a58f361522990465165c>` using `rnid`:
+
+```sh
+rnid -i bc7291552be7a58f361522990465165c -V rns-1.2.1-py3-none-any.whl.rsg
+```
+
+### 2026-04-28: RNS 1.2.0
+
+This release brings the ability to use Git natively over Reticulum networks, adds the `rnsh` program as part of the included utilities, and additionally includes several improvements and performance optimizations.
+
+**Changes**
+- Added Reticulum Git Repositories Node utility as part of included utility programs.
+- Added git remote helper to interact with git repositories over Reticulum.
+- Added the `rnsh` program to the included utilities.
+- Added LocalInterface client TX hold on client app sleep on Android.
+- Added AutoInterface filters for `rmnet` interfaces on Android.
+- Added inbound packet wait during transport core initialization.
+- Added the ability to set logfile destination before RNS initialization.
+- Added automatic active link teardown on instance shutdown.
+- Improved link teardown on SIGINT/SIGTERM.
+- Improved ratchet cleaning.
+
+**Release Hashes**
+```
+b58e97332241755ed32e309d46e09615a123490430ae85fcbdec9318c9e26154 rns-1.2.0-py3-none-any.whl
+9813a6c2236edba18af7d3a072a6226bc65ae384d23b1f41467cb3617d65fdae rnspure-1.2.0-py3-none-any.whl
+```
+
+**Release Signatures**
+Release artifacts include `rsg` signature files that can be validated against the RNS release signing identity `<bc7291552be7a58f361522990465165c>` using `rnid`:
+
+```sh
+rnid -i bc7291552be7a58f361522990465165c -V rns-1.2.0-py3-none-any.whl.rsg
+```
+
+### 2026-04-22: RNS 1.1.9
+
+This maintenance release fixes a critical security issue, that would allow an attacker to craft a BZ2 decompression bomb via Resource transfers or Buffer StreamDataMessage, causing an out-of-memory condition and crashing the receiving process via OOM killer.
+
+Big thanks to @defidude (github.com/ratspeak) for discovering and reporting this vulnerability!
+
+**Changes**
+- Fixed bz2 decompression bomb vulnerability in Resource transfer assembly and Buffer StreamDataMessage unpacking.
+
+**Release Hashes**
+```
+39a131aeb5d76fd73bfc67f68135f49ab0cf8628af154e04096a05c208ce77b6 rns-1.1.9-py3-none-any.whl
+aab7bfc8c65514c9bdf4c22f00d288faf6c9e1777fc002dbe3eb29c286e67128 rnspure-1.1.9-py3-none-any.whl
+```
+
+**Release Signatures**
+Release artifacts include `rsg` signature files that can be validated against the RNS release signing identity `<bc7291552be7a58f361522990465165c>` using `rnid`:
+
+```sh
+rnid -i bc7291552be7a58f361522990465165c -V rns-1.1.9-py3-none-any.whl.rsg
+```
+
+### 2026-04-21: RNS 1.1.8
+
+This maintenance release fixes a critical bug in path state management, that could result in significant path convergence degradation under certain conditions.
+
+**Changes**
+- Fixed path state potentially being applied before path table entry exists, causing worse paths to be selected.
+
+**Release Hashes**
+```
+9cf728e9e9a9fe113e4ac14e6b833f7ee65feedf8468e6ab94a261bf205f2632 rns-1.1.8-py3-none-any.whl
+407dc3975335e9eabaaddb7ed1dc75fc3a1b8d24a7207e740797440c2ad0b3e5 rnspure-1.1.8-py3-none-any.wh
+```
+
+**Release Signatures**
+Release artifacts include `rsg` signature files that can be validated against the RNS release signing identity `<bc7291552be7a58f361522990465165c>` using `rnid`:
+
+```sh
+rnid -i bc7291552be7a58f361522990465165c -V rns-1.1.8-py3-none-any.whl.rsg
+```
+
+### 2026-04-21: RNS 1.1.7
+
+**Changes**
+- Added periodic known destination data cleaning based on local relevance.
+- Improved resource transfer sequencing timing calculations and reliability.
+- Improved BackboneInterface error handling on EPOLL errors.
+- Ensured non-background data persist runs synchronously.
+
+**Release Hashes**
+```
+4d9702c5d9bb8a3c8b94766cb51cccad5afd78d615af9a6b146730347044e6f0 rns-1.1.7-py3-none-any.whl
+172dede7656b41b85e4319354ed04649b518e58c54586da7e443579c620a0a5b rnspure-1.1.7-py3-none-any.whl
+```
+
+**Release Signatures**
+Release artifacts include `rsg` signature files that can be validated against the RNS release signing identity `<bc7291552be7a58f361522990465165c>` using `rnid`:
+
+```sh
+rnid -i bc7291552be7a58f361522990465165c -V rns-1.1.7-py3-none-any.whl.rsg
+```
+
+### 2026-04-18: RNS 1.1.6
+
+**Changes**
+- Improved transport memory consumption.
+- Improved transport tunnel handling.
+- Improved gracious transport data persist handling.
+- Added ingress control bypass for pending path requests.
+- Added local destinations lookup map for better transport efficiency to local destinations.
+- Fixed disk I/O bound thread execution time starvation on cache management jobs.
+- Fixed invalid EPOLL modification error handler.
+- Fixed incorrect default IFAC size for autoconnected, discovered interfaces. Thanks @taprootmx!
+- Ensure loop-originating closures have variables captured at iteration-time. Thanks @taprootmx!
+
+**Release Hashes**
+```
+2ce4451668f8c464295cc269188c232e7805ddd618ec0135550a5e6809df5de0 rns-1.1.6-py3-none-any.whl
+ba3e541e69a2f4892177383c8ec4e7d172d298546317e08270928c0163865aa3 rnspure-1.1.6-py3-none-any.wh
+```
+
+**Release Signatures**
+Release artifacts include `rsg` signature files that can be validated against the RNS release signing identity `<bc7291552be7a58f361522990465165c>` using `rnid`:
+
+```sh
+rnid -i bc7291552be7a58f361522990465165c -V rns-1.1.6-py3-none-any.whl.rsg
+```
+
+### 2026-04-13: RNS 1.1.5
+
+**Changes**
+- Initial refactoring work for free-threaded transport I/O.
+- Improved interface discovery validation.
+- Fixed invalid ingress control burst activation and subsequent path resolution failure due to incorrect announce frequency calculation.
+- Fixed missing configuration entry generation for discovered I2P interfaces.
+- Fixed resource transfer cancellation failing on in-flight split resource transfers.
+- Fixed ingress control configuration not inheriting down to spawned interfaces on some interface types.
+
+**Release Hashes**
+```
+28f39ad97ef307a1e270b91ef19db07d8e1a7bbc8628c478303725894c64deff rns-1.1.5-py3-none-any.whl
+1a90db16d2cff4ad909b44baf9b4fd0177da2ed545cdb9cfb2c51423707b49e9 rnspure-1.1.5-py3-none-any.whl
+```
+
+**Release Signatures**
+Release artifacts include `rsg` signature files that can be validated against the RNS release signing identity `<bc7291552be7a58f361522990465165c>` using `rnid`:
+
+```sh
+rnid -i bc7291552be7a58f361522990465165c -V rns-1.1.5-py3-none-any.whl.rsg
+```
+
+#
+
+### 2026-03-12: RNS 1.1.4
+
+**Changes**
+- Fixed invalid application of IP/hostname validation for on non-relevant interfaces. Thanks @joakim!
+
+**Release Hashes**
+```
+b2a175abd64d1581dd058206832793dbf7053a304c819ff8bc143a79c49cb747 rns-1.1.4-py3-none-any.whl
+16c4ae6722bbd016e8db046e7bdd60eb24f9ec55966ec5723dc39301265d0186 rnspure-1.1.4-py3-none-any.whl
+```
+
+**Release Signatures**
+Release artifacts include `rsg` signature files that can be validated against the RNS release signing identity `<bc7291552be7a58f361522990465165c>` using `rnid`:
+
+```sh
+rnid -i bc7291552be7a58f361522990465165c -V rns-1.1.4-py3-none-any.whl.rsg
+```
+
 ### 2026-01-17: RNS 1.1.3
 
 **Changes**

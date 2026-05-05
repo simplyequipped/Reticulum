@@ -126,6 +126,7 @@ class Resource:
     PART_TIMEOUT_FACTOR           = 4
     PART_TIMEOUT_FACTOR_AFTER_RTT = 2
     PROOF_TIMEOUT_FACTOR          = 3
+    HMU_WAIT_FACTOR               = 3.5
     MAX_RETRIES                   = 16
     MAX_ADV_RETRIES               = 4
     SENDER_GRACE_TIME             = 10.0
@@ -193,6 +194,7 @@ class Resource:
             resource.window_flexibility   = Resource.WINDOW_FLEXIBILITY
             resource.last_activity        = time.time()
             resource.started_transferring = resource.last_activity
+            resource.advertisement_packet = advertisement_packet
 
             resource.storagepath          = RNS.Reticulum.resourcepath+"/"+resource.original_hash.hex()
             resource.meta_storagepath     = resource.storagepath+".meta"
@@ -359,6 +361,7 @@ class Resource:
         self.request_id = request_id
         self.started_transferring = None
         self.is_response = is_response
+        self.max_decompressed_size = Resource.AUTO_COMPRESS_MAX_SIZE
         self.auto_compress_limit = Resource.AUTO_COMPRESS_MAX_SIZE
         self.auto_compress_option = auto_compress
 
@@ -594,15 +597,16 @@ class Resource:
                     extra_wait = retries_used * Resource.PER_RETRY_DELAY
 
                     self.update_eifr()
+                    expected_hmu_wait_remaining = (self.sdu*8*self.HMU_WAIT_FACTOR)/self.eifr if self.waiting_for_hmu or self.outstanding_parts == 0 else 0
                     expected_tof_remaining = (self.outstanding_parts*self.sdu*8)/self.eifr
 
                     if self.req_resp_rtt_rate != 0:
-                        sleep_time = self.last_activity + self.part_timeout_factor*expected_tof_remaining + Resource.RETRY_GRACE_TIME + extra_wait - time.time()
+                        sleep_time = self.last_activity + self.part_timeout_factor*expected_tof_remaining + expected_hmu_wait_remaining + Resource.RETRY_GRACE_TIME + extra_wait - time.time()
                     else:
                         sleep_time = self.last_activity + self.part_timeout_factor*((3*self.sdu)/self.eifr) + Resource.RETRY_GRACE_TIME + extra_wait - time.time()
                     
                     # TODO: Remove debug at some point
-                    # RNS.log(f"EIFR {RNS.prettyspeed(self.eifr)}, ETOF {RNS.prettyshorttime(expected_tof_remaining)} ", RNS.LOG_DEBUG, pt=True)
+                    # RNS.log(f"EIFR {RNS.prettyspeed(self.eifr)}, ETOF {RNS.prettyshorttime(expected_tof_remaining)}, EHWR {RNS.prettyshorttime(expected_hmu_wait_remaining)}", RNS.LOG_DEBUG, pt=True)
                     # RNS.log(f"Resource ST {RNS.prettyshorttime(sleep_time)}, RTT {RNS.prettyshorttime(self.rtt or self.link.rtt)}, {self.outstanding_parts} left", RNS.LOG_DEBUG, pt=True)
                     
                     if sleep_time < 0:
@@ -677,8 +681,15 @@ class Resource:
                 # Strip off random hash
                 data = data[Resource.RANDOM_HASH_SIZE:]
 
-                if self.compressed: self.data = bz2.decompress(data)
-                else: self.data = data
+                if not self.compressed: self.data = data
+                else:
+                    decompressor = bz2.BZ2Decompressor()
+                    self.data = decompressor.decompress(data, max_length=self.max_decompressed_size)
+                    if not decompressor.eof:
+                        self.status = Resource.CORRUPT
+                        self.cancel()
+                        RNS.log(f"Decompressed resource exceeded maximum decompressed size. The resource was rejected.", RNS.LOG_ERROR)
+                        return
 
                 calculated_hash = RNS.Identity.full_hash(self.data+self.random_hash)
                 if calculated_hash == self.hash:
@@ -755,18 +766,18 @@ class Resource:
         # Prepare the next segment for advertisement
         RNS.log(f"Preparing segment {self.segment_index+1} of {self.total_segments} for resource {self}", RNS.LOG_DEBUG)
         self.preparing_next_segment = True
-        self.next_segment = Resource(
-            self.input_file, self.link,
-            callback = self.callback,
-            segment_index = self.segment_index+1,
-            original_hash=self.original_hash,
-            progress_callback = self.__progress_callback,
-            request_id = self.request_id,
-            is_response = self.is_response,
-            advertise = False,
-            auto_compress = self.auto_compress_option,
-            sent_metadata_size = self.metadata_size,
-        )
+        self.next_segment = Resource(self.input_file, self.link,
+                                     callback = self.callback,
+                                     segment_index = self.segment_index+1,
+                                     original_hash=self.original_hash,
+                                     progress_callback = self.__progress_callback,
+                                     request_id = self.request_id,
+                                     is_response = self.is_response,
+                                     advertise = False,
+                                     auto_compress = self.auto_compress_option,
+                                     sent_metadata_size = self.metadata_size)
+        if self.__progress_callback:
+            self.next_segment.progress_callback(self.__progress_callback)
 
     def validate_proof(self, proof_data):
         if not self.status == Resource.FAILED:
@@ -959,6 +970,7 @@ class Resource:
                     self.last_activity = time.time()
                     self.req_sent = self.last_activity
                     self.req_sent_bytes = len(request_packet.raw)
+                    self.rtt_rxd_bytes_at_part_req = self.rtt_rxd_bytes
                     self.req_resp = None
 
                 except Exception as e:
@@ -1056,8 +1068,7 @@ class Resource:
                 self.retries_left = 3
 
             if self.__progress_callback != None:
-                try:
-                    self.__progress_callback(self)
+                try: self.__progress_callback(self)
                 except Exception as e:
                     RNS.log("Error while executing progress callback from "+str(self)+". The contained exception was: "+str(e), RNS.LOG_ERROR)
 
@@ -1065,7 +1076,14 @@ class Resource:
         """
         Cancels transferring the resource.
         """
-        if self.status < Resource.COMPLETE:
+        if self.next_segment: self.next_segment.cancel()
+
+        if self.status == Resource.CORRUPT:
+            self.link.cancel_incoming_resource(self)
+            self.reject(self.advertisement_packet)
+            self.link.teardown()
+
+        elif self.status < Resource.COMPLETE:
             self.status = Resource.FAILED
             if self.initiator:
                 if self.link.status == RNS.Link.ACTIVE:
@@ -1103,6 +1121,7 @@ class Resource:
 
     def progress_callback(self, callback):
         self.__progress_callback = callback
+        if self.next_segment: self.next_segment.progress_callback(callback)
 
     def get_progress(self):
         """
