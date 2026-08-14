@@ -31,6 +31,51 @@
 import re
 import RNS
 
+# Validate ref names according to https://git-scm.com/docs/git-check-ref-format
+# This may be a bit overkill, since git validates names as well, but why not.
+def san_ref(ref):
+    if ref.startswith("-"):                return None
+    if ref.startswith("/"):                return None
+    if ref.endswith("/"):                  return None
+    if ref.endswith("."):                  return None
+
+    if " "     in ref:                     return None
+    if not "/" in ref:                     return None
+    if ".."    in ref:                     return None
+    if "/."    in ref:                     return None
+    if "//"    in ref:                     return None
+    if "\\"    in ref:                     return None
+
+    for comp in ref.split("/"):
+        if comp.endswith(".lock"):         return None
+
+    if not all(ord(c) >= 40 for c in ref): return None # Any control character
+    if "\x7f" in ref:                      return None # ASCII DEL (177)
+    if "~"    in ref:                      return None
+    if "^"    in ref:                      return None
+    if ":"    in ref:                      return None
+    if "?"    in ref:                      return None
+    if "*"    in ref:                      return None
+    if "["    in ref:                      return None
+    if "@{"   in ref:                      return None
+    if "@"    == ref:                      return None
+
+    return ref
+
+def san_refs(refs):
+    if not type(refs) == list: return None
+    for ref in refs:
+        if not san_ref(ref): return None
+
+    return refs
+
+# Git SHA format validation
+def san_sha(sha):
+    if len(sha) < 40: return None
+    try: bytes.fromhex(sha)
+    except: return None
+    return sha
+
 class MarkdownToMicron:    
     BOLD = "`!"
     BOLD_END = "`!"
@@ -82,16 +127,25 @@ class MarkdownToMicron:
     
     TABLE_MIN_COL_WIDTH = 3
 
-    def __init__(self, max_width=100, syntax_highlighter=None):
+    def __init__(self, max_width=100, syntax_highlighter=None, url_scope=None):
         self.max_width = max_width
+        self.local_url_scope = url_scope or ":/page/"
+        self.__local_url_scope = self.local_url_scope
         self.syntax_highlighter = syntax_highlighter
         self.wcwidth = None
+
+        self.bold_links = True
+        self.underline_links = True
+        self.link_color = None
         
         try:
             import wcwidth
             self.wcwidth = wcwidth
 
         except: RNS.log(f"The wcwidth module is unavailable, display width calculations for some glyphs will be incorrect", RNS.LOG_WARNING)
+
+    def set_url_scope(self, url_scope): self.local_url_scope = url_scope
+    def restore_url_scope(self, url_scope): self.local_url_scope = self.__local_url_scope
 
     def display_width(self, text):
         if not self.wcwidth: return len(text)
@@ -101,7 +155,8 @@ class MarkdownToMicron:
             w = self.wcwidth.wcswidth(text)
             return w if w is not None and w >= 0 else len(text)
     
-    def format_block(self, text):
+    def format_block(self, text, url_scope=None):
+        # text = text.replace("\\", "\\\\") # Now handled in format_line instead
         lines = text.split('\n')
         result_lines = []
         in_code_block = False
@@ -153,19 +208,21 @@ class MarkdownToMicron:
             code_content = '\n'.join(code_buffer)
             
             if self.syntax_highlighter and code_block_lang:
-                try:
-                    highlighted = self.syntax_highlighter.highlight(code_content, language=code_block_lang)
-                    result_lines.append(f"{self.CODE_BG}{self.CODE_FG}")
-                    result_lines.append(highlighted)
-                    result_lines.append(self.CODE_RESET)
+                if code_block_lang.lower() == "rawmu": result_lines.append(code_content)
+                else:
+                    try:
+                        highlighted = self.syntax_highlighter.highlight(code_content, language=code_block_lang)
+                        result_lines.append(f"{self.CODE_BG}{self.CODE_FG}")
+                        result_lines.append(highlighted)
+                        result_lines.append(self.CODE_RESET)
 
-                except Exception:
-                    # Fallback to plain literal block on any error
-                    result_lines.append(f"{self.CODE_BG}{self.CODE_FG}")
-                    result_lines.append(self.LITERAL_START)
-                    result_lines.append(self._escape_literals(code_content))
-                    result_lines.append(self.LITERAL_END)
-                    result_lines.append(self.CODE_RESET)
+                    except Exception:
+                        # Fallback to plain literal block on any error
+                        result_lines.append(f"{self.CODE_BG}{self.CODE_FG}")
+                        result_lines.append(self.LITERAL_START)
+                        result_lines.append(self._escape_literals(code_content))
+                        result_lines.append(self.LITERAL_END)
+                        result_lines.append(self.CODE_RESET)
             else:
                 result_lines.append(f"{self.CODE_BG}{self.CODE_FG}")
                 result_lines.append(self.LITERAL_START)
@@ -177,7 +234,7 @@ class MarkdownToMicron:
         
         for line in lines:
             is_fence, lang_hint = self._detect_code_fence(line)
-            
+
             if is_fence:
                 # Flush any pending structures before code fence
                 flush_quote_buffer()
@@ -246,6 +303,11 @@ class MarkdownToMicron:
     
     def format_line(self, line, mode="normal"):
         if mode == "codeblock": return self._escape_literals(line)
+        line = line.replace("\\", "\\\\")
+
+        if line.startswith("-") and not line.startswith("---") and not line.startswith("- "): line = f"\\{line}"
+        if line.startswith("<"): line = f"\\{line}"
+        # if line.startswith(">"): line = f"\\{line}" # Now handled by blockquotes
         
         if self.HORIZONTAL_RULE_RE.match(line): return self._format_horizontal_rule()
         
@@ -270,28 +332,38 @@ class MarkdownToMicron:
             links.append((match.group(1), match.group(2)))
             return f"\x00LINK{len(links)-1}\x00"
         
-        text = self.INLINE_CODE_RE.sub(extract_code, text)
         text = self.LINK_RE.sub(extract_link, text)
+        text = self.INLINE_CODE_RE.sub(extract_code, text)
         text = self.BOLD_RE.sub(self._bold_sub, text)
         text = self.ITALIC_RE.sub(self._italic_sub, text)
         
         def restore_link(match):
             idx = int(match.group(1))
             text, url = links[idx]
+            
+            anchor_components = url.split("#")
+            url = anchor_components[0]
+            anchor = anchor_components[1] if len(anchor_components) > 1 else ""
+
+            if not ":/" in url:
+                url = f"{self.local_url_scope}{url}"
+                if anchor: url = f"{url}|anchor={anchor}"
+
+            undl = "`_" if self.underline_links else ""
+            bold = "`!" if self.bold_links else ""
             text = text.replace('`', '')
-            return f"`!`[{text}`{url}]`!"
+            link = f"{undl}{bold}`[{text}`{url}]{bold}{undl}"
+
+            if self.link_color and len(self.link_color) == 3: link = f"`F{self.link_color}{link}`f"
+            if self.link_color and len(self.link_color) == 6: link = f"`FT{self.link_color}{link}`f"
+
+            return link
         
         text = re.sub(r'\x00LINK(\d+)\x00', restore_link, text)
         
         def restore_code(match):
             idx = int(match.group(1))
             content = code_blocks[idx]
-            
-            # Disabled for now
-            # highlighted = self._highlight_inline_code(content)
-            # if highlighted: return highlighted
-            
-            # Use plain inline code formatting
             content = content.replace('`', '\\`')
             return f"{self.CODE_BG_INLINE}{self.CODE_FG}{content}{self.CODE_RESET}"
         
@@ -614,19 +686,64 @@ class MarkdownToMicron:
             return " " * left + text + " " * right
         else:
             return text + " " * padding
-    
+
     def _truncate_cell(self, text, width):
         if self._visible_width(text) <= width: return text
-        
-        stripped = text
-        stripped = re.sub(r'`[FB][0-9a-fA-F]{3}', '', stripped)
-        stripped = re.sub(r'`[!*_]', '', stripped)
-        stripped = re.sub(r'`f`b', '', stripped)
-        
-        if len(stripped) <= width - 1: return text
-        
-        truncated = stripped[:width - 1] + "…"
-        return truncated
+
+        truncation_point = len(text)
+        while truncation_point > 0 and self._visible_width(text[0:truncation_point]) >= width:
+            truncation_point -= 1
+
+        truncated = text[:truncation_point]
+
+        # Yes, this is convoluted, but if someone else has
+        # a better idea on how to handle unclosed micron
+        # tags in the truncated cells, I'm all ears.
+        active_tags = set()
+        fg_active = False
+        bg_active = False
+
+        i = 0
+        while i < len(truncated):
+            if truncated[i] == '`':
+                if i + 1 < len(truncated):
+                    tag_char = truncated[i + 1]
+
+                    if tag_char in '!*_=':
+                        if tag_char in active_tags: active_tags.remove(tag_char)
+                        else:                       active_tags.add(tag_char)
+                        i += 2
+                        continue
+
+                    elif tag_char == 'f':
+                        fg_active = False
+                        i += 2
+                        continue
+
+                    elif tag_char == 'b':
+                        bg_active = False
+                        i += 2
+                        continue
+
+                    elif tag_char == 'F':
+                        fg_active = True
+                        if i + 2 < len(truncated) and truncated[i + 2] == 'T': i += 8
+                        else:                                                  i += 5
+                        continue
+
+                    elif tag_char == 'B':
+                        bg_active = True
+                        if i + 2 < len(truncated) and truncated[i + 2] == 'T': i += 8
+                        else:                                                  i += 5
+                        continue
+            i += 1
+
+        closers = []
+        if fg_active: closers.append('`f')
+        if bg_active: closers.append('`b')
+        for fmt in active_tags: closers.append(f'`{fmt}')
+
+        return truncated + ''.join(closers) + "…"
     
     def _wrap_text(self, text, width):
         if not text: return [""]

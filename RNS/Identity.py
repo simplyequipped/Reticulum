@@ -76,6 +76,7 @@ class Identity:
     # Non-configurable constants
     TOKEN_OVERHEAD            = RNS.Cryptography.Token.TOKEN_OVERHEAD
     AES128_BLOCKSIZE          = 16          # In bytes
+    AES256_BLOCKSIZE          = 16          # In bytes
     HASHLENGTH                = 256         # In bits
     SIGLENGTH                 = KEYSIZE     # In bits
 
@@ -126,13 +127,15 @@ class Identity:
         :returns: An :ref:`RNS.Identity<api-identity>` instance that can be used to create an outgoing :ref:`RNS.Destination<api-destination>`, or *None* if the destination is unknown.
         """
         if from_identity_hash:
-            for destination_hash in Identity.known_destinations:
-                if target_hash == Identity.truncated_hash(Identity.known_destinations[destination_hash][2]):
+            with Identity.known_destinations_lock: destination_hashes = list(Identity.known_destinations.keys())
+            for destination_hash in destination_hashes:
+                entry = Identity.known_destinations.get(destination_hash)
+                if not entry: continue
+                if target_hash == Identity.truncated_hash(entry[2]):
                     if not _no_use: RNS.Reticulum.get_instance()._used_destination_data(destination_hash)
-                    identity_data = Identity.known_destinations[destination_hash]
                     identity = Identity(create_keys=False)
-                    identity.load_public_key(identity_data[2])
-                    identity.app_data = identity_data[3]
+                    identity.load_public_key(entry[2])
+                    identity.app_data = entry[3]
                     return identity
 
             return None
@@ -171,12 +174,9 @@ class Identity:
         else: return None
 
     @staticmethod
-    def save_known_destinations(background=False, recombine=True):
-        # TODO: Improve the storage method so we don't have to
-        # deserialize and serialize the entire table on every
-        # save, but the only changes. It might be possible to
-        # simply overwrite on exit now that every local client
-        # disconnect triggers a data persist.
+    def save_known_destinations(background=False, recombine=False):
+        if recombine: RNS.log(f"Recombining known destinations from disk cache on persist is deprecated, argument ignored", RNS.LOG_WARNING)
+        if RNS.Transport.owner.is_connected_to_shared_instance: return
         
         try:
             if hasattr(Identity, "saving_known_destinations"):
@@ -191,40 +191,26 @@ class Identity:
 
             Identity.saving_known_destinations = True
             save_start = time.time()
+            RNS.log("Saving "+str(len(Identity.known_destinations))+" known destinations to storage...", RNS.LOG_DEBUG) if RNS.sl(RNS.LOG_DEBUG) else None
 
-            if recombine:
-                storage_known_destinations = {}
-                if os.path.isfile(RNS.Reticulum.storagepath+"/known_destinations"):
-                    try:
-                        with open(RNS.Reticulum.storagepath+"/known_destinations","rb") as file:
-                            storage_known_destinations = umsgpack.load(file)
-     
-                    except: pass
+            temp_file = RNS.Reticulum.storagepath+f"/known_destinations.tmp.{time.time()}"
+            try:
+                with open(temp_file,"wb") as file: umsgpack.dump(Identity.known_destinations.copy(), file)
+                os.replace(temp_file, RNS.Reticulum.storagepath+f"/known_destinations")
 
-                try:
-                    for destination_hash in storage_known_destinations:
-                        if not destination_hash in Identity.known_destinations:
-                            with Identity.known_destinations_lock:
-                                Identity.known_destinations[destination_hash] = storage_known_destinations[destination_hash]
-                
-                except Exception as e:
-                    RNS.log("Skipped recombining known destinations from disk, since an error occurred: "+str(e), RNS.LOG_WARNING)
+            except Exception as e:
+                RNS.log(f"Error while serializing and writing known destinations: {e}", RNS.LOG_ERROR)
+                try: os.unlink(temp_file)
+                except Exception as e: RNS.log(f"Could not clean up temporary file {temp_file}: {e}", RNS.LOG_WARNING)
+                raise e
 
-            RNS.log("Saving "+str(len(Identity.known_destinations))+" known destinations to storage...", RNS.LOG_VERBOSE)
-            with open(RNS.Reticulum.storagepath+"/known_destinations","wb") as file:
-                umsgpack.dump(Identity.known_destinations.copy(), file)
-
-            save_time = time.time() - save_start
-            if save_time < 1: time_str = str(round(save_time*1000,2))+"ms"
-            else:             time_str = str(round(save_time,2))+"s"
-
-            RNS.log("Saved known destinations to storage in "+time_str, RNS.LOG_VERBOSE)
+            RNS.log(f"Saved known destinations to storage in {RNS.prettyshorttime(time.time()-save_start)}", RNS.LOG_DEBUG) if RNS.sl(RNS.LOG_DEBUG) else None
 
         except Exception as e:
             RNS.log("Error while saving known destinations to disk, the contained exception was: "+str(e), RNS.LOG_ERROR)
             RNS.trace_exception(e)
 
-        Identity.saving_known_destinations = False
+        finally: Identity.saving_known_destinations = False
 
     @staticmethod
     def load_known_destinations():
@@ -279,9 +265,24 @@ class Identity:
                 return True
 
         return False
+
+    @staticmethod
+    def _retain_identity(identity_hash):
+        try:
+            retained = False
+            with Identity.known_destinations_lock: destination_hashes = list(Identity.known_destinations.keys())
+            for destination_hash in destination_hashes:
+                entry = Identity.known_destinations.get(destination_hash)
+                if not entry: continue
+                if identity_hash == Identity.truncated_hash(entry[2]):
+                    if Identity._retain_destination_data(destination_hash): retained = True
+
+            return retained
+
+        except Exception as e: RNS.log(f"Error while retaining identity {RNS.prettyhexrep(identity_hash)}: {e}", RNS.LOG_ERROR)
     
     @staticmethod
-    def clean_known_destinations():
+    def clean_known_destinations(background=False):
         now        = time.time()
         st         = now
         total      = len(Identity.known_destinations)
@@ -289,8 +290,15 @@ class Identity:
         no_path    = 0
         retained   = 0
         never_used = 0
-        for destination_hash in Identity.known_destinations:
+        ratchetdir = RNS.Reticulum.storagepath+"/ratchets"
+
+        RNS.log(f"Cleaning known destinations{' at background priority' if background else ''}...", RNS.LOG_DEBUG) if RNS.sl(RNS.LOG_DEBUG) else None
+
+        with Identity.known_destinations_lock: destination_hashes = list(Identity.known_destinations.keys())
+        for destination_hash in destination_hashes:
             try:
+                if background: time.sleep(0.001) # Low priority, yield thread
+                RNS.Transport.destinations_last_cleaned = time.time()
                 if RNS.Transport.has_path(destination_hash): has_path = True
                 else:
                     has_path = False
@@ -321,7 +329,7 @@ class Identity:
                             if not was_used and now - last_announce > RNS.Transport.UNUSED_DESTINATION_LINGER: stale.append(destination_hash)
                             elif unused_for > RNS.Transport.DESTINATION_TIMEOUT*1.25:                          stale.append(destination_hash)
 
-            except Exception as e: RNS.log(f"Faulty entry for {RNS.prettyhexrep(destination_hash)} while cleaning known destinations: {e}", RNS.LOG_DEBUG)
+            except Exception as e: RNS.log(f"Faulty entry for {RNS.prettyhexrep(destination_hash)} while cleaning known destinations: {e}", RNS.LOG_DEBUG) if RNS.sl(RNS.LOG_DEBUG) else None
 
         removed = 0
         for destination_hash in stale:
@@ -330,7 +338,14 @@ class Identity:
                     Identity.known_destinations.pop(destination_hash)
                     removed += 1
 
-        # RNS.log(f"Total destinations: {total}, stale: {len(stale)}, removed: {removed}, no path: {no_path}, never used: {never_used}, with path: {total-no_path}, used: {total-never_used}, retained: {retained}. Completed in {RNS.prettyshorttime(time.time()-st)}", RNS.LOG_WARNING) # TODO: Remove
+            try:
+                hexhash = RNS.hexrep(destination_hash, delimit=False)
+                ratchet_path = f"{ratchetdir}/{hexhash}"
+                if os.path.isfile(ratchet_path): os.unlink(ratchet_path)
+            except Exception as e: RNS.log(f"Could not clean stale ratchets for {RNS.prettyhexrep(destination_hash)}: {e}", RNS.LOG_WARNING)
+
+        RNS.log(f"Cleaned known destinations in {RNS.prettyshorttime(time.time()-st)}", RNS.LOG_DEBUG) if RNS.sl(RNS.LOG_DEBUG) else None
+        RNS.log(f"Total: {total}, stale: {len(stale)}, removed: {removed}, no path: {no_path}, never used: {never_used}, with path: {total-no_path}, used: {total-never_used}, retained: {retained}", RNS.LOG_PATHING) if RNS.sl(RNS.LOG_PATHING) else None
         if not RNS.Transport.owner.is_connected_to_shared_instance: Identity.save_known_destinations(recombine=False)
 
     @staticmethod
@@ -400,7 +415,7 @@ class Identity:
                 ratchet_exists = False
 
             if not ratchet_exists:
-                RNS.log(f"Remembering ratchet {RNS.prettyhexrep(Identity._get_ratchet_id(ratchet))} for {RNS.prettyhexrep(destination_hash)}", RNS.LOG_EXTREME)
+                RNS.log(f"Remembering ratchet {RNS.prettyhexrep(Identity._get_ratchet_id(ratchet))} for {RNS.prettyhexrep(destination_hash)}", RNS.LOG_EXTREME) if RNS.sl(RNS.LOG_EXTREME) else None
                 Identity.known_ratchets[destination_hash] = ratchet
                 if not RNS.Transport.owner.is_connected_to_shared_instance:
                     def persist_job():
@@ -429,7 +444,7 @@ class Identity:
 
     @staticmethod
     def _clean_ratchets():
-        RNS.log("Cleaning ratchets...", RNS.LOG_DEBUG)
+        RNS.log("Cleaning ratchets...", RNS.LOG_DEBUG) if RNS.sl(RNS.LOG_DEBUG) else None
         try:
             count = 0
             removed = 0
@@ -464,7 +479,7 @@ class Identity:
                         RNS.log(f"The contained exception was: {e}", RNS.LOG_ERROR)
 
         except Exception as e: RNS.log(f"An error occurred while cleaning ratchets. The contained exception was: {e}", RNS.LOG_ERROR)
-        RNS.log(f"Processed {count} ratchets in {RNS.prettytime(time.time()-now)}, not in use {not_known}, removed {removed}", RNS.LOG_DEBUG)
+        RNS.log(f"Processed {count} ratchets in {RNS.prettytime(time.time()-now)}, not in use {not_known}, removed {removed}", RNS.LOG_DEBUG) if RNS.sl(RNS.LOG_DEBUG) else None
 
     @staticmethod
     def get_ratchet(destination_hash):
@@ -489,7 +504,7 @@ class Identity:
         if destination_hash in Identity.known_ratchets:
             return Identity.known_ratchets[destination_hash]
         else:
-            RNS.log(f"Could not load ratchet for {RNS.prettyhexrep(destination_hash)}", RNS.LOG_DEBUG)
+            RNS.log(f"Could not load ratchet for {RNS.prettyhexrep(destination_hash)}", RNS.LOG_DEBUG) if RNS.sl(RNS.LOG_DEBUG) else None
             return None
 
     @staticmethod
@@ -537,7 +552,7 @@ class Identity:
 
                 if len(RNS.Transport.blackholed_identities) > 0:
                     if announced_identity.hash in RNS.Transport.blackholed_identities:
-                        RNS.log(f"Invalidated and dropped announce from blackholed identity {RNS.prettyhexrep(announced_identity.hash)}", RNS.LOG_EXTREME)
+                        RNS.log(f"Invalidated and dropped announce from blackholed identity {RNS.prettyhexrep(announced_identity.hash)}", RNS.LOG_EXTREME) if RNS.sl(RNS.LOG_EXTREME) else None
                         return False
 
                 if announced_identity.pub != None and announced_identity.validate(signature, signed_data):
@@ -566,30 +581,27 @@ class Identity:
                             signal_str = " ["
                             if packet.rssi != None:
                                 signal_str += "RSSI "+str(packet.rssi)+"dBm"
-                                if packet.snr != None:
-                                    signal_str += ", "
-                            if packet.snr != None:
-                                signal_str += "SNR "+str(packet.snr)+"dB"
+                                if packet.snr != None: signal_str += ", "
+                            if packet.snr != None: signal_str += "SNR "+str(packet.snr)+"dB"
                             signal_str += "]"
-                        else:
-                            signal_str = ""
+
+                        else: signal_str = ""
 
                         if hasattr(packet, "transport_id") and packet.transport_id != None:
-                            RNS.log("Valid announce for "+RNS.prettyhexrep(destination_hash)+" "+str(packet.hops)+" hops away, received via "+RNS.prettyhexrep(packet.transport_id)+" on "+str(packet.receiving_interface)+signal_str, RNS.LOG_EXTREME)
+                            RNS.log("Valid announce for "+RNS.prettyhexrep(destination_hash)+" "+str(packet.hops)+" hops away, received via "+RNS.prettyhexrep(packet.transport_id)+" on "+str(packet.receiving_interface)+signal_str, RNS.LOG_EXTREME) if RNS.sl(RNS.LOG_EXTREME) else None
                         else:
-                            RNS.log("Valid announce for "+RNS.prettyhexrep(destination_hash)+" "+str(packet.hops)+" hops away, received on "+str(packet.receiving_interface)+signal_str, RNS.LOG_EXTREME)
+                            RNS.log("Valid announce for "+RNS.prettyhexrep(destination_hash)+" "+str(packet.hops)+" hops away, received on "+str(packet.receiving_interface)+signal_str, RNS.LOG_EXTREME) if RNS.sl(RNS.LOG_EXTREME) else None
 
-                        if ratchet:
-                            Identity._remember_ratchet(destination_hash, ratchet)
+                        if ratchet: Identity._remember_ratchet(destination_hash, ratchet)
 
                         return True
 
                     else:
-                        RNS.log("Received invalid announce for "+RNS.prettyhexrep(destination_hash)+": Destination mismatch.", RNS.LOG_DEBUG)
+                        RNS.log("Received invalid announce for "+RNS.prettyhexrep(destination_hash)+": Destination mismatch.", RNS.LOG_DEBUG) if RNS.sl(RNS.LOG_DEBUG) else None
                         return False
 
                 else:
-                    RNS.log("Received invalid announce for "+RNS.prettyhexrep(destination_hash)+": Invalid signature.", RNS.LOG_DEBUG)
+                    RNS.log("Received invalid announce for "+RNS.prettyhexrep(destination_hash)+": Invalid signature.", RNS.LOG_DEBUG) if RNS.sl(RNS.LOG_DEBUG) else None
                     del announced_identity
                     return False
         
@@ -656,6 +668,22 @@ class Identity:
             RNS.log("Error while saving identity to "+str(path), RNS.LOG_ERROR)
             RNS.log("The contained exception was: "+str(e))
 
+    def pub_to_file(self, path):
+        """
+        Saves the public identity to a file.
+
+        :param path: The full path specifying where to save the identity.
+        :returns: True if the file was saved, otherwise False.
+        """
+        try:
+            with open(path, "wb") as key_file:
+                key_file.write(self.get_public_key())
+                return True
+            return False
+        except Exception as e:
+            RNS.log("Error while saving identity to "+str(path), RNS.LOG_ERROR)
+            RNS.log("The contained exception was: "+str(e))
+
     def __init__(self,create_keys=True):
         # Initialize keys to none
         self.prv           = None
@@ -695,13 +723,15 @@ class Identity:
         """
         :returns: The private key as *bytes*
         """
-        return self.prv_bytes+self.sig_prv_bytes
+        if self.prv_bytes and self.sig_prv_bytes: return self.prv_bytes+self.sig_prv_bytes
+        else:                                     return None
 
     def get_public_key(self):
         """
         :returns: The public key as *bytes*
         """
-        return self.pub_bytes+self.sig_pub_bytes
+        if self.pub_bytes and self.sig_pub_bytes: return self.pub_bytes+self.sig_pub_bytes
+        else:                                     return None
 
     def load_private_key(self, prv_bytes):
         """
@@ -848,7 +878,7 @@ class Identity:
                                 pass
 
                     if enforce_ratchets and plaintext == None:
-                        RNS.log("Decryption with ratchet enforcement by "+RNS.prettyhexrep(self.hash)+" failed. Dropping packet.", RNS.LOG_DEBUG)
+                        RNS.log("Decryption with ratchet enforcement by "+RNS.prettyhexrep(self.hash)+" failed. Dropping packet.", RNS.LOG_DEBUG) if RNS.sl(RNS.LOG_DEBUG) else None
                         if ratchet_id_receiver:
                             ratchet_id_receiver.latest_ratchet_id = None
                         return None
@@ -861,14 +891,14 @@ class Identity:
                             ratchet_id_receiver.latest_ratchet_id = None
 
                 except Exception as e:
-                    RNS.log("Decryption by "+RNS.prettyhexrep(self.hash)+" failed: "+str(e), RNS.LOG_DEBUG)
+                    RNS.log("Decryption by "+RNS.prettyhexrep(self.hash)+" failed: "+str(e), RNS.LOG_DEBUG) if RNS.sl(RNS.LOG_DEBUG) else None
                     if ratchet_id_receiver:
                         ratchet_id_receiver.latest_ratchet_id = None
                     
                 return plaintext
             
             else:
-                RNS.log("Decryption failed because the token size was invalid.", RNS.LOG_DEBUG)
+                RNS.log("Decryption failed because the token size was invalid.", RNS.LOG_DEBUG) if RNS.sl(RNS.LOG_DEBUG) else None
                 return None
         else:
             raise KeyError("Decryption failed because identity does not hold a private key")

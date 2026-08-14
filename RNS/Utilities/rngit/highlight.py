@@ -165,15 +165,15 @@ class SyntaxHighlighter:
             
             except Exception as e:
                 RNS.log(f"Pygments highlighting failed, falling back: {e}", RNS.LOG_WARNING)
-                return self._plain_text(content)
+                return self._plain_text(content).replace("\\", "\\\\")
         
         # TODO: Implement Python tokenize fallback for .py files.
         # For now, route to plain text
         if filename and filename.endswith(".py"):
-            return self._plain_text(content)
+            return self._plain_text(content).replace("\\", "\\\\")
         
         # Universal fallback
-        return self._plain_text(content)
+        return self._plain_text(content).replace("\\", "\\\\")
     
     def _highlight_pygments(self, content, filename=None, language=None):
         from pygments.lexers import get_lexer_for_filename, guess_lexer, get_lexer_by_name
@@ -218,8 +218,10 @@ class MicronFormatter:
         output_parts = []
         prev_was_dot = False
         
+        last_ended_with_break = True
         for ttype, value in tokensource:
             is_dot = (str(ttype) == "Token.Operator" and value == ".")
+            ends_with_break = value.endswith("\n")
             
             # If previous token was a dot and this is a Name, treat as attribute/function call
             # TODO: Improve this if we can check next token as parantheses or something.
@@ -241,19 +243,39 @@ class MicronFormatter:
                     else:                        ilb = ""
                     if escaped.endswith("\n"):   tlb = "\n"; escaped = escaped[:-1]
                     else:                        tlb = ""
-                    output_parts.append(f"{ilb}`FT{color}{escaped}`f{tlb}")
+
+                    if len(escaped): output = f"{ilb}`FT{color}{escaped}`f{tlb}"
+                    else:            output = f"{ilb}{tlb}"
+
+                    output_parts.append(output)
                 
-                else: output_parts.append(self._escape_value(value))
+                else:
+                    escaped = self._escape_value(value)
+                    if "\n" in escaped:
+                        parts = []
+                        splitl = escaped.splitlines()
+                        if len(splitl) > 1:
+                            for line in splitl:
+                                if   line.startswith("-"): l = f"\\{line}"
+                                elif line.startswith(">"): l = f"\\{line}"
+                                elif line.startswith("<"): l = f"\\{line}"
+                                else:                      l = line
+                                parts.append(l)
+                            trmpart = "\n" if escaped.endswith("\n") else ""
+                            escaped = "\n".join(parts)+trmpart
+
+                    elif last_ended_with_break:
+                        if   escaped.startswith("-"): escaped = f"\\{escaped}"
+                        elif escaped.startswith(">"): escaped = f"\\{escaped}"
+                        elif escaped.startswith("<"): escaped = f"\\{escaped}"
+                    
+                    output_parts.append(escaped)
             
             prev_was_dot = is_dot
+            last_ended_with_break = ends_with_break
         
         output = "".join(output_parts)
-        final_output = ""
-        for line in output.splitlines():
-            if line.startswith(">"): line = f"`>{line}"
-            final_output += f"{line}\n"
-
-        outfile.write(final_output)
+        outfile.write(output)
     
     def _get_color_key_for_token(self, ttype):
         token_parts = []
@@ -279,7 +301,8 @@ class MicronFormatter:
         return None
     
     @staticmethod
-    def _escape_value(value: str) -> str: return value.replace("`", "\\`")
+    def _escape_value(value):
+        return value.replace("\\", "\\\\").replace("`", "\\`")
     
     # Required by Pygments formatter API, returns None for Micron
     def get_style_defs(self, arg=None): return None

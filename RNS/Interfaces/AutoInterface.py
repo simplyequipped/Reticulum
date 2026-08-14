@@ -428,14 +428,22 @@ class AutoInterface(Interface):
                                         if ifname in self.interface_servers:
                                             RNS.log("Shutting down previous UDP listener for "+str(self)+" "+str(ifname), RNS.LOG_DEBUG)
                                             previous_server = self.interface_servers[ifname]
-                                            def shutdown_server():
-                                                previous_server.shutdown()
+                                            def shutdown_server(): previous_server.shutdown()
                                             threading.Thread(target=shutdown_server, daemon=True).start()
 
                                         RNS.log("Starting new UDP listener for "+str(self)+" "+str(ifname), RNS.LOG_DEBUG)
 
-                                        udp_server = socketserver.UDPServer(listen_address, self.handler_factory(self.process_incoming))
-                                        self.interface_servers[ifname] = udp_server
+                                        retry_delay = 1.25
+                                        listener_started = False
+                                        while not listener_started:
+                                            try:
+                                                time.sleep(retry_delay)
+                                                udp_server = socketserver.UDPServer(listen_address, self.handler_factory(self.process_incoming))
+                                                self.interface_servers[ifname] = udp_server
+                                                listener_started = True
+                                            except Exception as e:
+                                                RNS.log(f"Could not start new UDP listener for {self} on {listen_address}: {e}", RNS.LOG_WARNING)
+                                                RNS.log(f"Retrying in {retry_delay} seconds", RNS.LOG_WARNING)
 
                                         thread = threading.Thread(target=udp_server.serve_forever)
                                         thread.daemon = True
@@ -539,6 +547,11 @@ class AutoInterface(Interface):
                 spawned_interface.ic_new_time = self.ic_new_time
                 spawned_interface.ic_burst_penalty = self.ic_burst_penalty
                 spawned_interface.ic_held_release_interval = self.ic_held_release_interval
+
+                spawned_interface.egress_control = self.egress_control
+                spawned_interface.ec_pr_freq = self.ec_pr_freq
+                spawned_interface.ic_pr_burst_freq_new = self.ic_pr_burst_freq_new
+                spawned_interface.ic_pr_burst_freq = self.ic_pr_burst_freq
                 
                 spawned_interface.parent_interface = self
                 spawned_interface.bitrate = self.bitrate
@@ -567,9 +580,10 @@ class AutoInterface(Interface):
                 spawned_interface.announce_rate_grace = self.announce_rate_grace
                 spawned_interface.announce_rate_penalty = self.announce_rate_penalty
                 spawned_interface.mode = self.mode
+                spawned_interface.gravity = self.gravity
                 spawned_interface.HW_MTU = self.HW_MTU
                 spawned_interface.online = True
-                RNS.Transport.interfaces.append(spawned_interface)
+                RNS.Transport.add_interface(spawned_interface)
                 if addr in self.spawned_interfaces:
                     self.spawned_interfaces[addr].detach()
                     self.spawned_interfaces[addr].teardown()
@@ -661,7 +675,7 @@ class AutoInterfacePeer(Interface):
             except Exception as e:
                 RNS.log(f"Could not remove {self} from parent interface on detach. The contained exception was: {e}", RNS.LOG_ERROR)
 
-        if self in RNS.Transport.interfaces: RNS.Transport.interfaces.remove(self)
+        RNS.Transport.remove_interface(self)
 
 class AutoInterfaceHandler(socketserver.BaseRequestHandler):
     def __init__(self, callback, *args, **keys):
